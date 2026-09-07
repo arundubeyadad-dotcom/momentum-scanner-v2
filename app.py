@@ -18,8 +18,22 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# Active market watch universe (Expandable to MidSmall 400 / Microcap list)
-SCAN_UNIVERSE = ["TBZ", "RESPONIND", "WONDERLA", "RELIANCE", "BPCL", "IOC", "TATASTEEL"]
+# -------------------------------------------------------------------
+# DHAN HQ REST API CREDENTIALS
+# -------------------------------------------------------------------
+CLIENT_ID = "1102152375"
+ACCESS_TOKEN = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9..." # Apna full token daal do
+
+# NSE Security IDs Map
+DHAN_WATCHLIST = {
+    "TBZ": "14366",
+    "RESPONIND": "11915",
+    "WONDERLA": "18652",
+    "RELIANCE": "2885",
+    "BPCL": "526",
+    "IOC": "1624",
+    "TATASTEEL": "3499"
+}
 
 def play_alert_sound():
     audio_script = """
@@ -38,64 +52,68 @@ def play_alert_sound():
     """
     components.html(audio_script, height=0, width=0)
 
-def evaluate_tier_engine(symbol):
-    session = requests.Session()
+def fetch_dhan_intraday_data(symbol, security_id):
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-        "Accept": "*/*"
+        "access-token": ACCESS_TOKEN,
+        "client-id": CLIENT_ID,
+        "Content-Type": "application/json",
+        "Accept": "application/json"
     }
     
-    url = f"https://query2.finance.yahoo.com/v8/finance/chart/{symbol}.NS?interval=1m&range=1d"
-    
+    # Dhan HQ REST API v2 Direct Endpoint
+    url = "https://api.dhan.co/v2/charts/intraday"
+    payload = {
+        "securityId": str(security_id),
+        "exchangeSegment": "NSE_EQ",
+        "instrumentType": "EQUITY",
+        "interval": "1"
+    }
+
     try:
-        res = session.get(url, headers=headers, timeout=5)
+        res = requests.post(url, json=payload, headers=headers, timeout=5)
         if res.status_code != 200:
             return None
             
-        data = res.json()['chart']['result'][0]
-        meta = data['meta']
-        timestamps = data.get('timestamp', [])
-        quote = data['indicators']['quote'][0]
-        
-        if not timestamps or not quote:
+        json_data = res.json()
+        if "close" not in json_data or not json_data["close"]:
             return None
 
-        ltp = float(meta.get('regularMarketPrice', 0))
-        pdc = float(meta.get('chartPreviousClose', ltp))
-        day_open = float(meta.get('regularMarketDayOpen', ltp))
-        day_high = float(meta.get('regularMarketDayHigh', ltp))
-        
-        raw_volumes = quote.get('volume', [])
-        raw_closes = quote.get('close', [])
-        raw_opens = quote.get('open', [])
-        
-        clean_data = [(v, c, o) for v, c, o in zip(raw_volumes, raw_closes, raw_opens) if None not in (v, c, o)]
-        if not clean_data:
+        closes = json_data["close"]
+        opens = json_data["open"]
+        highs = json_data["high"]
+        volumes = json_data["volume"]
+
+        if not volumes or len(volumes) < 2:
             return None
-            
-        volumes = [x[0] for x in clean_data]
-        closes = [x[1] for x in clean_data]
-        opens = [x[2] for x in clean_data]
+
+        ltp = float(closes[-1])
+        day_open = float(opens[0])
+        day_high = max([float(h) for h in highs])
         
+        # PDC proxy from candle 1 open if historical PDC unavailable
+        pdc = float(opens[0])
+
         curr_1m_vol = float(volumes[-1])
-        total_vol = float(sum(volumes))
-        
-        avg_1m_vol = float(pd.Series(volumes).tail(20).mean()) if len(volumes) >= 20 else (total_vol / max(len(volumes), 1))
+        total_vol = float(sum([float(v) for v in volumes]))
+
+        # RVOL against 20-candle moving average
+        vol_series = pd.Series([float(v) for v in volumes])
+        avg_1m_vol = float(vol_series.tail(20).mean()) if len(vol_series) >= 20 else (total_vol / max(len(vol_series), 1))
         rvol = curr_1m_vol / avg_1m_vol if avg_1m_vol > 0 else 1.0
-        
+
         turnover_1m = ltp * curr_1m_vol
-        vwap = sum(c * v for c, v in zip(closes, volumes)) / total_vol if total_vol > 0 else ltp
+        vwap = sum(float(c) * float(v) for c, v in zip(closes, volumes)) / total_vol if total_vol > 0 else ltp
 
         candle1_open = float(opens[0])
         candle1_close = float(closes[0])
         candle1_change_pct = ((candle1_close - candle1_open) / candle1_open) * 100 if candle1_open > 0 else 0
-        
+
         open_gap_pct = ((candle1_open - pdc) / pdc) * 100 if pdc > 0 else 0
         day_gain_pct = ((ltp - pdc) / pdc) * 100 if pdc > 0 else 0
         max_gain_pct = ((day_high - candle1_open) / candle1_open) * 100 if candle1_open > 0 else 0
 
         # -------------------------------------------------------------------
-        # DYNAMIC STRATEGY EVALUATION (APPLIED TO ANY STOCK)
+        # EXACT PRESERVED STRATEGY TIERS
         # -------------------------------------------------------------------
         tier1_signal = (1.0 <= open_gap_pct <= 4.0) and (candle1_change_pct >= 3.0) and (rvol >= 5.0)
         tier2_signal = (rvol >= 3.0)
@@ -125,14 +143,14 @@ def evaluate_tier_engine(symbol):
 # -------------------------------------------------------------------
 # STREAMLIT UI ENGINE
 # -------------------------------------------------------------------
-st.title("⚡ Dynamic Multi-Tier Strategy Screener")
+st.title("⚡ Dynamic Multi-Tier Strategy Screener (Dhan REST)")
 
 if st.button("🔄 Refresh Data", use_container_width=True):
     st.cache_data.clear()
 
 results = []
 with ThreadPoolExecutor(max_workers=7) as executor:
-    futures = [executor.submit(evaluate_tier_engine, sym) for sym in SCAN_UNIVERSE]
+    futures = [executor.submit(fetch_dhan_intraday_data, sym, sec_id) for sym, sec_id in DHAN_WATCHLIST.items()]
     for future in futures:
         res = future.result()
         if res:
@@ -147,4 +165,4 @@ if results:
 
     st.dataframe(df.drop(columns=["Triggered"]), use_container_width=True)
 else:
-    st.warning("Fetching live market data...")
+    st.warning("Connecting to Dhan Direct REST Engine...")
