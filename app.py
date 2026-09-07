@@ -1,7 +1,6 @@
 import streamlit as st
 import pandas as pd
 import requests
-from bs4 import BeautifulSoup
 from concurrent.futures import ThreadPoolExecutor
 
 st.set_page_config(
@@ -43,7 +42,6 @@ def fetch_ticker_metrics(symbol):
         
         turnover_1m = ltp * curr_1m_vol
         
-        # VWAP calculation
         closes = [c for c in quotes.get('close', []) if c is not None]
         vwap = sum(c * v for c, v in zip(closes, volumes)) / sum(volumes) if sum(volumes) > 0 else ltp
 
@@ -56,7 +54,7 @@ def fetch_ticker_metrics(symbol):
         max_gain_pct = ((day_high - day_open) / day_open) * 100 if day_open > 0 else 0
 
         # -------------------------------------------------------------------
-        # STRICT PRESERVED TIER PARAMETERS (UNTOUCHED)
+        # EXACT PRESERVED STRATEGY PARAMETERS
         # -------------------------------------------------------------------
         tier1_signal = (1.0 <= open_gap_pct <= 4.0) and (candle1_change_pct >= 3.0) and (rvol >= 5.0)
         tier2_signal = (rvol >= 3.0) and (turnover_1m >= 1_000_000)
