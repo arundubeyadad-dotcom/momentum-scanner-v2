@@ -1,11 +1,10 @@
 import streamlit as st
 import pandas as pd
-from dhanhq import dhanhq
+import requests
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, time
 
 st.set_page_config(
-    page_title="Institutional Stealth Engine",
+    page_title="NSE Live Screener Engine",
     page_icon="⚡",
     layout="wide"
 )
@@ -19,77 +18,72 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # -------------------------------------------------------------------
-# FINAL DHAN API CREDENTIALS FIX
+# DIRECT NSE LIVE DATA ENGINE (NO BROKER SDK)
 # -------------------------------------------------------------------
-CLIENT_ID = "1102152375"
-ACCESS_TOKEN = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzUxMiJ9.eyJ1c2VyUmVaw9uUijoiUjEiLCJpc3MiOiJkaGFuR3UIIwicGFydG5lckIJOiIwiZXhwIjoxNzg4ODQxMjA1LCJpYXQiOjE3MDg3NTQ4MDUsInRva2Vu2Q2uc3VtZXJXB1IjoiU0VMRIisInd1Ymhvb2tvCwmwi0iIIlCJkaGFuFuQ2xpZW50SWQioiIxMTAyMTYmZC1In0.2_sopwOWgEc-ABkluQms4EVW31Q00BQXBoBGI0ovu8W-LIAvc1QV5bniIZo6hM_eU4Up_CNhrjev5gR19m0s8Q"
-
-try:
-    dhan = dhanhq(CLIENT_ID, ACCESS_TOKEN)
-except Exception as e:
-    st.error(f"Dhan Connection Error: {e}")
-    st.stop()
-
-DHAN_WATCHLIST = {
-    "TBZ": "14366",
-    "RESPONIND": "11915",
-    "WONDERLA": "18652",
-    "RELIANCE": "2885",
-    "BPCL": "526",
-    "IOC": "1624",
-    "TATASTEEL": "3499"
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept": "*/*",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Referer": "https://www.nseindia.com/"
 }
 
-def analyze_ticker(symbol, security_id):
+@st.cache_resource(ttl=120)
+def get_nse_session():
+    session = requests.Session()
+    session.headers.update(HEADERS)
     try:
-        data = dhan.historical_minute_charts(
-            security_id=security_id,
-            exchange_segment="NSE_EQ",
-            instrument_type="EQUITY",
-            from_date=datetime.now().strftime('%Y-%m-%d'),
-            to_date=datetime.now().strftime('%Y-%m-%d')
-        )
+        session.get("https://www.nseindia.com", timeout=5)
+    except Exception:
+        pass
+    return session
 
-        if data.get('status') != 'success' or not data.get('data'):
-            return None
+WATCHLIST = ["TBZ", "RESPONIND", "WONDERLA", "RELIANCE", "BPCL", "IOC", "TATASTEEL"]
 
-        df_1m = pd.DataFrame(data['data'])
-        if df_1m.empty:
-            return None
-
-        ltp = float(df_1m['close'].iloc[-1])
-        day_open = float(df_1m['open'].iloc[0])
-        day_high = float(df_1m['high'].max())
-        pdc = float(df_1m['open'].iloc[0])
+def fetch_nse_ticker(symbol):
+    session = get_nse_session()
+    url = f"https://www.nseindia.com/api/quote-equity?symbol={symbol}"
+    
+    try:
+        res = session.get(url, timeout=5)
+        if res.status_code != 200:
+            session = get_nse_session()
+            res = session.get(url, timeout=5)
+            
+        data = res.json()
+        price_info = data.get('priceInfo', {})
         
-        curr_1m_vol = float(df_1m['volume'].iloc[-1])
-        avg_1m_vol = float(df_1m['volume'].tail(20).mean())
-        rvol = curr_1m_vol / avg_1m_vol if avg_1m_vol > 0 else 1.0
+        ltp = float(price_info.get('lastPrice', 0))
+        day_open = float(price_info.get('open', 0))
+        day_high = float(price_info.get('intraDayHighLow', {}).get('max', 0))
+        pdc = float(price_info.get('previousClose', 0))
+        total_vol = float(price_info.get('totalTradedVolume', 0))
         
-        turnover_1m = ltp * curr_1m_vol
+        vwap = float(price_info.get('vwap', ltp))
+        day_gain_pct = float(price_info.get('pChange', 0))
         
-        v_sum = df_1m['volume'].sum()
-        vwap = (df_1m['close'] * df_1m['volume']).sum() / v_sum if v_sum > 0 else ltp
-
+        # Volume metric calculations from live feed
+        avg_vol_est = total_vol / 375 if total_vol > 0 else 1.0
+        rvol = (total_vol / 100) / avg_vol_est if avg_vol_est > 0 else 1.0
+        
+        turnover_est = ltp * (total_vol / 375)
         open_gap_pct = ((day_open - pdc) / pdc) * 100 if pdc > 0 else 0
-        candle1_change_pct = ((float(df_1m['close'].iloc[0]) - day_open) / day_open) * 100
-        day_gain_pct = ((ltp - pdc) / pdc) * 100 if pdc > 0 else 0
-        max_gain_pct = ((day_high - day_open) / day_open) * 100
+        max_gain_pct = ((day_high - day_open) / day_open) * 100 if day_open > 0 else 0
 
-        tier1_signal = (1.0 <= open_gap_pct <= 4.0) and (candle1_change_pct >= 3.0) and (rvol >= 5.0)
-        tier2_signal = (rvol >= 3.0) and (turnover_1m >= 1_000_000)
-        tier3_signal = (max_gain_pct >= 10.0) and (ltp < vwap * 0.99) and (datetime.now().time() <= time(10, 30))
-        tier4_signal = (rvol >= 4.0) and (ltp < day_open * 0.975)
+        # Tier Screening Signals
+        tier1_signal = (1.0 <= open_gap_pct <= 4.0) and (day_gain_pct >= 3.0) and (rvol >= 2.0)
+        tier2_signal = (rvol >= 2.5) and (turnover_est >= 500_000)
+        tier3_signal = (max_gain_pct >= 8.0) and (ltp < vwap * 0.99)
+        tier4_signal = (rvol >= 3.0) and (ltp < day_open * 0.98)
 
-        capital_deployment = (curr_1m_vol * ltp * 0.0025) / 5
+        capital_deployment = ((total_vol / 375) * ltp * 0.0025) / 5
 
         return {
             "Symbol": symbol,
             "LTP": round(ltp, 2),
             "Day Gain %": f"{day_gain_pct:+.2f}%",
-            "RVOL": f"{rvol:.1f}x",
             "VWAP": round(vwap, 2),
-            "Turnover (1m)": f"₹{turnover_1m / 100000:.1f}L",
+            "Gap %": f"{open_gap_pct:+.2f}%",
+            "Total Vol": f"{total_vol:,.0f}",
             "Max Deploy (₹)": f"₹{capital_deployment:,.0f}",
             "Tier 1 (TBZ)": "🟢 TRIGGERED" if tier1_signal else "-",
             "Tier 2 (RESPONIND)": "⚡ STEALTH" if tier2_signal else "-",
@@ -99,20 +93,23 @@ def analyze_ticker(symbol, security_id):
     except Exception:
         return None
 
-st.title("⚡ Direct Dhan Live Market Engine")
+# -------------------------------------------------------------------
+# APP DISPLAY ENGINE
+# -------------------------------------------------------------------
+st.title("⚡ Direct NSE Live Market Engine")
 
-if st.button("🔄 Refresh Live Ticks", use_container_width=True):
+if st.button("🔄 Refresh Data", use_container_width=True):
     st.cache_data.clear()
 
-triggered_stocks = []
+results = []
 with ThreadPoolExecutor(max_workers=5) as executor:
-    futures = [executor.submit(analyze_ticker, sym, sec_id) for sym, sec_id in DHAN_WATCHLIST.items()]
+    futures = [executor.submit(fetch_nse_ticker, sym) for sym in WATCHLIST]
     for future in futures:
         res = future.result()
         if res:
-            triggered_stocks.append(res)
+            results.append(res)
 
-if triggered_stocks:
-    st.dataframe(pd.DataFrame(triggered_stocks), use_container_width=True)
+if results:
+    st.dataframe(pd.DataFrame(results), use_container_width=True)
 else:
-    st.info("Scanning live market...")
+    st.warning("Scanning NSE live stream... Click Refresh.")
