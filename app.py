@@ -1,9 +1,9 @@
 import streamlit as st
 import pandas as pd
+import requests
 import datetime
 import streamlit.components.v1 as components
 from concurrent.futures import ThreadPoolExecutor
-from dhanhq import DhanContext, dhanhq
 
 st.set_page_config(page_title="Universal Tier Momentum Engine", page_icon="⚡", layout="wide")
 
@@ -15,9 +15,12 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# Clean Credentials
-RAW_CLIENT_ID = str(st.secrets.get("DHAN_CLIENT_ID", "1102152375"))
-RAW_TOKEN = str(st.secrets.get("DHAN_ACCESS_TOKEN", ""))
+# Credentials Clean Formatting
+DEFAULT_CLIENT_ID = "1102152375"
+DEFAULT_TOKEN = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzUxMiJ9.eyJ1c2VyUmVnaW9uIjoiUjEiLCJpc3MiOiJkaGFuIiwicGFydG5lcklkIjoiIiwiZXhwIjoxNzg4ODQxMjA1LCJpYXQiOjE3ODg3NTQ4MDUsInRva2VuQ29uc3VtZXJUeXBlIjoiU0VMRiIsIndlYmhvb2tVcmwiOiIiLCJkaGFuQ2xpZW50SWQiOiIxMTAyMTUyMzc1In0.2_sopwOWgEc-ABkluQms4EVW31QO0BQXBoBGI0ovu8W-LIAvc1QV5bniIZo6hM_eU4Up_CNhrjev5gRl9m0s8Q"
+
+RAW_CLIENT_ID = str(st.secrets.get("DHAN_CLIENT_ID", DEFAULT_CLIENT_ID))
+RAW_TOKEN = str(st.secrets.get("DHAN_ACCESS_TOKEN", DEFAULT_TOKEN))
 
 CLIENT_ID = RAW_CLIENT_ID.strip()
 ACCESS_TOKEN = RAW_TOKEN.strip().replace("\n", "").replace("\r", "").replace(" ", "").replace('"', '')
@@ -52,36 +55,51 @@ def play_alert_sound():
 
 def fetch_dhan_intraday_data(symbol, security_id):
     if not ACCESS_TOKEN or not CLIENT_ID:
-        return {"Symbol": symbol, "Error": "Missing Credentials in Secrets"}
+        return {"Symbol": symbol, "Error": "Missing Client ID or Access Token"}
+
+    # Dhan v2 API Required Headers (dhanClientId + client-id + access-token)
+    headers = {
+        "access-token": ACCESS_TOKEN,
+        "client-id": CLIENT_ID,
+        "dhanClientId": CLIENT_ID,
+        "Content-Type": "application/json",
+        "Accept": "application/json"
+    }
+    
+    url = "https://api.dhan.co/v2/charts/intraday"
+    today_str = datetime.datetime.now().strftime("%Y-%m-%d")
+
+    payload = {
+        "securityId": str(security_id),
+        "exchangeSegment": "NSE_EQ",
+        "instrument": "EQUITY",
+        "interval": "1",
+        "oi": False,
+        "fromDate": today_str,
+        "toDate": today_str
+    }
 
     try:
-        context = DhanContext(CLIENT_ID, ACCESS_TOKEN)
-        dhan = dhanhq(context)
+        res = requests.post(url, json=payload, headers=headers, timeout=6)
+        
+        if res.status_code != 200:
+            return {"Symbol": symbol, "Error": f"HTTP {res.status_code}: {res.text}"}
+            
+        json_data = res.json()
 
-        today = datetime.datetime.now().date()
-        from_date = today - datetime.timedelta(days=2)
+        # Handle Dhan standard response dictionary wrapping
+        candles = json_data.get("data", json_data) if isinstance(json_data, dict) else {}
+        
+        if "close" not in candles or not candles["close"]:
+            return {"Symbol": symbol, "Error": "No intraday candles found for today"}
 
-        data = dhan.get_intraday_data(
-            security_id=str(security_id),
-            exchange_segment="NSE_EQ",
-            instrument_type="EQUITY",
-            from_date=from_date,
-            to_date=today,
-            interval="1"
-        )
-
-        if not data or data.get("status") == "failure" or "close" not in data.get("data", {}):
-            err_msg = data.get("remarks", {}).get("error_message") if isinstance(data, dict) else "No Candle Data"
-            return {"Symbol": symbol, "Error": err_msg or "Dhan API Fetch Failed"}
-
-        chart_data = data["data"]
-        closes = chart_data["close"]
-        opens = chart_data["open"]
-        highs = chart_data["high"]
-        volumes = chart_data["volume"]
+        closes = candles["close"]
+        opens = candles["open"]
+        highs = candles["high"]
+        volumes = candles["volume"]
 
         if not volumes or len(volumes) < 2:
-            return {"Symbol": symbol, "Error": "Insufficient Candles"}
+            return {"Symbol": symbol, "Error": "Insufficient volume data"}
 
         ltp = float(closes[-1])
         day_open = float(opens[0])
@@ -106,7 +124,7 @@ def fetch_dhan_intraday_data(symbol, security_id):
         day_gain_pct = ((ltp - pdc) / pdc) * 100 if pdc > 0 else 0
         max_gain_pct = ((day_high - candle1_open) / candle1_open) * 100 if candle1_open > 0 else 0
 
-        # Tier Logic
+        # Tier Signals Logic
         tier1_signal = (1.0 <= open_gap_pct <= 4.0) and (candle1_change_pct >= 3.0) and (rvol >= 5.0)
         tier2_signal = (rvol >= 3.0)
         tier3_signal = (max_gain_pct >= 10.0) and (ltp < vwap * 0.99)
@@ -132,7 +150,7 @@ def fetch_dhan_intraday_data(symbol, security_id):
     except Exception as e:
         return {"Symbol": symbol, "Error": str(e)}
 
-# Interface Setup
+# Streamlit App Execution
 st.title("⚡ Universal Tier Momentum Engine")
 
 if st.button("🔄 Refresh Market Data", use_container_width=True):
