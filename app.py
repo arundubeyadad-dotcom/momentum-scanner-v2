@@ -38,51 +38,66 @@ def play_alert_sound():
     components.html(audio_script, height=0, width=0)
 
 def fetch_ticker_metrics(symbol):
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
+    }
+    
+    # Primary Endpoint: Yahoo Spark
+    url_spark = f"https://query1.finance.yahoo.com/v7/finance/spark?symbols={symbol}.NS&range=1d&interval=1m"
+    # Fallback Endpoint: Direct Chart API
+    url_chart = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}.NS?range=1d&interval=1m"
+    
+    data = None
     try:
-        url = f"https://query1.finance.yahoo.com/v7/finance/spark?symbols={symbol}.NS&range=1d&interval=1m"
-        headers = {'User-Agent': 'Mozilla/5.0'}
-        res = requests.get(url, headers=headers, timeout=5)
-        
-        data = res.json()['spark']['result'][0]['response'][0]
-        meta = data['meta']
-        indicators = data['indicators']['quote'][0]
+        res = requests.get(url_spark, headers=headers, timeout=4)
+        if res.status_code == 200:
+            data = res.json()['spark']['result'][0]['response'][0]
+    except Exception:
+        pass
+
+    if not data:
+        try:
+            res = requests.get(url_chart, headers=headers, timeout=4)
+            if res.status_code == 200:
+                data = res.json()['chart']['result'][0]
+        except Exception:
+            return None
+
+    if not data:
+        return None
+
+    try:
+        meta = data.get('meta', {})
+        indicators = data.get('indicators', {}).get('quote', [{}])[0]
         
         ltp = float(meta.get('regularMarketPrice', 0))
         pdc = float(meta.get('chartPreviousClose', ltp))
         day_open = float(meta.get('regularMarketDayOpen', ltp))
         day_high = float(meta.get('regularMarketDayHigh', ltp))
         
-        # Safe extraction of non-None values to prevent index errors
         volumes = [v for v in indicators.get('volume', []) if v is not None]
         closes = [c for c in indicators.get('close', []) if c is not None]
         opens = [o for o in indicators.get('open', []) if o is not None]
         
-        if not volumes or not closes:
-            return None
-            
-        total_vol = float(sum(volumes))
-        curr_1m_vol = float(volumes[-1])
+        curr_1m_vol = float(volumes[-1]) if volumes else 1.0
+        total_vol = float(sum(volumes)) if volumes else 1.0
         
-        # 20-candle moving average volume calculation
         avg_1m_vol = float(pd.Series(volumes).tail(20).mean()) if len(volumes) >= 20 else (total_vol / max(len(volumes), 1))
         rvol = curr_1m_vol / avg_1m_vol if avg_1m_vol > 0 else 1.0
         
         turnover_1m = ltp * curr_1m_vol
-        vwap = sum(c * v for c, v in zip(closes, volumes)) / sum(volumes) if sum(volumes) > 0 else ltp
+        vwap = sum(c * v for c, v in zip(closes, volumes)) / sum(volumes) if (volumes and sum(volumes) > 0) else ltp
 
-        # Precision First Candle Calculations
         candle1_open = float(opens[0]) if opens else day_open
         candle1_close = float(closes[0]) if closes else day_open
         candle1_change_pct = ((candle1_close - candle1_open) / candle1_open) * 100 if candle1_open > 0 else 0
         
-        # Gap Calculation against actual 9:15 AM candle open
         open_gap_pct = ((candle1_open - pdc) / pdc) * 100 if pdc > 0 else 0
-        
         day_gain_pct = ((ltp - pdc) / pdc) * 100 if pdc > 0 else 0
         max_gain_pct = ((day_high - candle1_open) / candle1_open) * 100 if candle1_open > 0 else 0
 
         # -------------------------------------------------------------------
-        # FIXED AND VALIDATED TIER CONDITIONS
+        # STRICT STRATEGY TIERS (UNTOUCHED LOGIC)
         # -------------------------------------------------------------------
         tier1_signal = (1.0 <= open_gap_pct <= 4.0) and (candle1_change_pct >= 3.0) and (rvol >= 5.0)
         tier2_signal = (rvol >= 3.0)
@@ -134,4 +149,4 @@ if results:
 
     st.dataframe(df.drop(columns=["Triggered"]), use_container_width=True)
 else:
-    st.info("Market feed scanning...")
+    st.warning("Market feed unreachable or market is closed. Click 'Refresh Data' to try again.")
