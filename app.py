@@ -19,15 +19,15 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # -------------------------------------------------------------------
-# HARDCODED CREDENTIALS
+# FINAL DHAN API CREDENTIALS FIX
 # -------------------------------------------------------------------
 CLIENT_ID = "1102152375"
 ACCESS_TOKEN = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzUxMiJ9.eyJ1c2VyUmVaw9uUijoiUjEiLCJpc3MiOiJkaGFuR3UIIwicGFydG5lckIJOiIwiZXhwIjoxNzg4ODQxMjA1LCJpYXQiOjE3MDg3NTQ4MDUsInRva2Vu2Q2uc3VtZXJXB1IjoiU0VMRIisInd1Ymhvb2tvCwmwi0iIIlCJkaGFuFuQ2xpZW50SWQioiIxMTAyMTYmZC1In0.2_sopwOWgEc-ABkluQms4EVW31Q00BQXBoBGI0ovu8W-LIAvc1QV5bniIZo6hM_eU4Up_CNhrjev5gR19m0s8Q"
 
 try:
-    dhan = dhanhq(client_id=CLIENT_ID, access_token=ACCESS_TOKEN)
+    dhan = dhanhq(CLIENT_ID, ACCESS_TOKEN)
 except Exception as e:
-    st.error(f"Connection Error: {e}")
+    st.error(f"Dhan Connection Error: {e}")
     st.stop()
 
 DHAN_WATCHLIST = {
