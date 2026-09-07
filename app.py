@@ -18,13 +18,13 @@ st.markdown("""
 # -------------------------------------------------------------------
 # SECURE SECRETS RETRIEVAL & CLEANING
 # -------------------------------------------------------------------
-RAW_CLIENT_ID = str(st.secrets.get("DHAN_CLIENT_ID", ""))
+RAW_CLIENT_ID = str(st.secrets.get("DHAN_CLIENT_ID", "1102152375"))
 RAW_TOKEN = str(st.secrets.get("DHAN_ACCESS_TOKEN", ""))
 
 CLIENT_ID = RAW_CLIENT_ID.strip()
 ACCESS_TOKEN = RAW_TOKEN.strip().replace("\n", "").replace("\r", "").replace(" ", "").replace('"', '')
 
-# Market Scan Universe Mapping (Symbol -> Dhan Security ID)
+# Watchlist Dictionary with Symbols and Dhan Security IDs
 DHAN_WATCHLIST = {
     "TBZ": "14366",
     "RESPONIND": "11915",
@@ -54,7 +54,7 @@ def play_alert_sound():
 
 def fetch_dhan_intraday_data(symbol, security_id):
     if not ACCESS_TOKEN or not CLIENT_ID:
-        return {"Symbol": symbol, "Error": "DHAN_CLIENT_ID or DHAN_ACCESS_TOKEN missing in Streamlit Secrets"}
+        return {"Symbol": symbol, "Error": "DHAN_CLIENT_ID ya DHAN_ACCESS_TOKEN missing hai"}
 
     headers = {
         "access-token": ACCESS_TOKEN,
@@ -85,7 +85,7 @@ def fetch_dhan_intraday_data(symbol, security_id):
         json_data = res.json()
         
         if "close" not in json_data or not json_data["close"]:
-            return {"Symbol": symbol, "Error": "No candle data returned"}
+            return {"Symbol": symbol, "Error": "Candle data nahi mila"}
 
         closes = json_data["close"]
         opens = json_data["open"]
@@ -118,7 +118,7 @@ def fetch_dhan_intraday_data(symbol, security_id):
         day_gain_pct = ((ltp - pdc) / pdc) * 100 if pdc > 0 else 0
         max_gain_pct = ((day_high - candle1_open) / candle1_open) * 100 if candle1_open > 0 else 0
 
-        # Tier Strategy Triggers
+        # Tier Strategy Signals
         tier1_signal = (1.0 <= open_gap_pct <= 4.0) and (candle1_change_pct >= 3.0) and (rvol >= 5.0)
         tier2_signal = (rvol >= 3.0)
         tier3_signal = (max_gain_pct >= 10.0) and (ltp < vwap * 0.99)
@@ -147,9 +147,9 @@ def fetch_dhan_intraday_data(symbol, security_id):
 # -------------------------------------------------------------------
 # APPLICATION INTERFACE
 # -------------------------------------------------------------------
-st.title("⚡ Dynamic Multi-Tier Strategy Screener")
+st.title("⚡ Universal Tier Momentum Engine")
 
-if st.button("🔄 Refresh Data", use_container_width=True):
+if st.button("🔄 Refresh Market Data", use_container_width=True):
     st.cache_data.clear()
 
 results = []
