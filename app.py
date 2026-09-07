@@ -52,34 +52,42 @@ def fetch_ticker_metrics(symbol):
         day_open = float(meta.get('regularMarketDayOpen', ltp))
         day_high = float(meta.get('regularMarketDayHigh', ltp))
         
+        # Safe extraction of non-None values to prevent index errors
         volumes = [v for v in indicators.get('volume', []) if v is not None]
         closes = [c for c in indicators.get('close', []) if c is not None]
         opens = [o for o in indicators.get('open', []) if o is not None]
         
-        total_vol = float(sum(volumes)) if volumes else 1.0
-        curr_1m_vol = float(volumes[-1]) if volumes else 1.0
+        if not volumes or not closes:
+            return None
+            
+        total_vol = float(sum(volumes))
+        curr_1m_vol = float(volumes[-1])
         
+        # 20-candle moving average volume calculation
         avg_1m_vol = float(pd.Series(volumes).tail(20).mean()) if len(volumes) >= 20 else (total_vol / max(len(volumes), 1))
         rvol = curr_1m_vol / avg_1m_vol if avg_1m_vol > 0 else 1.0
         
         turnover_1m = ltp * curr_1m_vol
-        vwap = sum(c * v for c, v in zip(closes, volumes)) / sum(volumes) if (volumes and sum(volumes) > 0) else ltp
+        vwap = sum(c * v for c, v in zip(closes, volumes)) / sum(volumes) if sum(volumes) > 0 else ltp
 
-        open_gap_pct = ((day_open - pdc) / pdc) * 100 if pdc > 0 else 0
+        # Precision First Candle Calculations
         candle1_open = float(opens[0]) if opens else day_open
         candle1_close = float(closes[0]) if closes else day_open
         candle1_change_pct = ((candle1_close - candle1_open) / candle1_open) * 100 if candle1_open > 0 else 0
         
+        # Gap Calculation against actual 9:15 AM candle open
+        open_gap_pct = ((candle1_open - pdc) / pdc) * 100 if pdc > 0 else 0
+        
         day_gain_pct = ((ltp - pdc) / pdc) * 100 if pdc > 0 else 0
-        max_gain_pct = ((day_high - day_open) / day_open) * 100 if day_open > 0 else 0
+        max_gain_pct = ((day_high - candle1_open) / candle1_open) * 100 if candle1_open > 0 else 0
 
         # -------------------------------------------------------------------
-        # EXACT UPDATED STRATEGY CONDITIONS
+        # FIXED AND VALIDATED TIER CONDITIONS
         # -------------------------------------------------------------------
         tier1_signal = (1.0 <= open_gap_pct <= 4.0) and (candle1_change_pct >= 3.0) and (rvol >= 5.0)
         tier2_signal = (rvol >= 3.0)
         tier3_signal = (max_gain_pct >= 10.0) and (ltp < vwap * 0.99)
-        tier4_signal = (rvol >= 4.0) and (ltp < day_open * 0.975)
+        tier4_signal = (rvol >= 4.0) and (ltp < candle1_open * 0.975)
 
         is_triggered = tier1_signal or tier2_signal or tier3_signal or tier4_signal
         capital_deployment = (curr_1m_vol * ltp * 0.0025) / 5
