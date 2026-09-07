@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import requests
+import datetime
 import streamlit.components.v1 as components
 from concurrent.futures import ThreadPoolExecutor
 
@@ -18,13 +19,11 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# -------------------------------------------------------------------
-# DHAN HQ REST API CREDENTIALS
-# -------------------------------------------------------------------
-CLIENT_ID = "1102152375"
-ACCESS_TOKEN = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9..." # Apna full token daal do
+# Fetch from Secrets or Fallback
+CLIENT_ID = st.secrets.get("DHAN_CLIENT_ID", "1102152375")
+ACCESS_TOKEN = st.secrets.get("DHAN_ACCESS_TOKEN", "")
 
-# NSE Security IDs Map
+# Standard NSE Equity Watchlist (Security IDs)
 DHAN_WATCHLIST = {
     "TBZ": "14366",
     "RESPONIND": "11915",
@@ -53,30 +52,39 @@ def play_alert_sound():
     components.html(audio_script, height=0, width=0)
 
 def fetch_dhan_intraday_data(symbol, security_id):
+    if not ACCESS_TOKEN:
+        return {"Symbol": symbol, "Error": "Missing Access Token in Streamlit Secrets"}
+
     headers = {
-        "access-token": ACCESS_TOKEN,
-        "client-id": CLIENT_ID,
+        "access-token": ACCESS_TOKEN.strip(),
+        "client-id": CLIENT_ID.strip(),
         "Content-Type": "application/json",
         "Accept": "application/json"
     }
     
-    # Dhan HQ REST API v2 Direct Endpoint
     url = "https://api.dhan.co/v2/charts/intraday"
+    today_str = datetime.datetime.now().strftime("%Y-%m-%d")
+
+    # Correct Official Dhan v2 Payload Structure
     payload = {
         "securityId": str(security_id),
         "exchangeSegment": "NSE_EQ",
-        "instrumentType": "EQUITY",
-        "interval": "1"
+        "instrument": "EQUITY",
+        "interval": "1",
+        "oi": False,
+        "fromDate": today_str,
+        "toDate": today_str
     }
 
     try:
         res = requests.post(url, json=payload, headers=headers, timeout=5)
+        
         if res.status_code != 200:
-            return None
+            return {"Symbol": symbol, "Error": f"Dhan HTTP {res.status_code}: {res.text}"}
             
         json_data = res.json()
         if "close" not in json_data or not json_data["close"]:
-            return None
+            return {"Symbol": symbol, "Error": "No Candle Data Received (Market Closed / Low Liquidity)"}
 
         closes = json_data["close"]
         opens = json_data["open"]
@@ -84,19 +92,16 @@ def fetch_dhan_intraday_data(symbol, security_id):
         volumes = json_data["volume"]
 
         if not volumes or len(volumes) < 2:
-            return None
+            return {"Symbol": symbol, "Error": "Insufficient Volume Data"}
 
         ltp = float(closes[-1])
         day_open = float(opens[0])
         day_high = max([float(h) for h in highs])
-        
-        # PDC proxy from candle 1 open if historical PDC unavailable
         pdc = float(opens[0])
 
         curr_1m_vol = float(volumes[-1])
         total_vol = float(sum([float(v) for v in volumes]))
 
-        # RVOL against 20-candle moving average
         vol_series = pd.Series([float(v) for v in volumes])
         avg_1m_vol = float(vol_series.tail(20).mean()) if len(vol_series) >= 20 else (total_vol / max(len(vol_series), 1))
         rvol = curr_1m_vol / avg_1m_vol if avg_1m_vol > 0 else 1.0
@@ -112,9 +117,7 @@ def fetch_dhan_intraday_data(symbol, security_id):
         day_gain_pct = ((ltp - pdc) / pdc) * 100 if pdc > 0 else 0
         max_gain_pct = ((day_high - candle1_open) / candle1_open) * 100 if candle1_open > 0 else 0
 
-        # -------------------------------------------------------------------
-        # EXACT PRESERVED STRATEGY TIERS
-        # -------------------------------------------------------------------
+        # Tier Signals
         tier1_signal = (1.0 <= open_gap_pct <= 4.0) and (candle1_change_pct >= 3.0) and (rvol >= 5.0)
         tier2_signal = (rvol >= 3.0)
         tier3_signal = (max_gain_pct >= 10.0) and (ltp < vwap * 0.99)
@@ -137,32 +140,35 @@ def fetch_dhan_intraday_data(symbol, security_id):
             "Tier 4 (Shock Dump)": "🚨 SHOCK DUMP" if tier4_signal else "-",
             "Triggered": is_triggered
         }
-    except Exception:
-        return None
+    except Exception as e:
+        return {"Symbol": symbol, "Error": str(e)}
 
-# -------------------------------------------------------------------
-# STREAMLIT UI ENGINE
-# -------------------------------------------------------------------
-st.title("⚡ Dynamic Multi-Tier Strategy Screener (Dhan REST)")
+st.title("⚡ Dynamic Multi-Tier Strategy Screener (Dhan v2)")
 
-if st.button("🔄 Refresh Data", use_container_width=True):
+if st.button("🔄 Refresh Market Data", use_container_width=True):
     st.cache_data.clear()
 
 results = []
+errors = []
+
 with ThreadPoolExecutor(max_workers=7) as executor:
     futures = [executor.submit(fetch_dhan_intraday_data, sym, sec_id) for sym, sec_id in DHAN_WATCHLIST.items()]
     for future in futures:
         res = future.result()
         if res:
-            results.append(res)
+            if "Error" in res:
+                errors.append(res)
+            else:
+                results.append(res)
+
+if errors:
+    for err in errors:
+        st.error(f"[{err['Symbol']}] {err['Error']}")
 
 if results:
     df = pd.DataFrame(results)
-    
     if any(df["Triggered"]):
         play_alert_sound()
         st.toast("🚨 STRATEGY TRIGGER DETECTED!", icon="🔔")
 
     st.dataframe(df.drop(columns=["Triggered"]), use_container_width=True)
-else:
-    st.warning("Connecting to Dhan Direct REST Engine...")
