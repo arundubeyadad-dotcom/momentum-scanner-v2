@@ -57,7 +57,6 @@ def fetch_dhan_intraday_data(symbol, security_id):
     if not ACCESS_TOKEN or not CLIENT_ID:
         return {"Symbol": symbol, "Error": "Missing Client ID or Access Token"}
 
-    # Dhan v2 API Required Headers (dhanClientId + client-id + access-token)
     headers = {
         "access-token": ACCESS_TOKEN,
         "client-id": CLIENT_ID,
@@ -79,76 +78,79 @@ def fetch_dhan_intraday_data(symbol, security_id):
         "toDate": today_str
     }
 
-    try:
-        res = requests.post(url, json=payload, headers=headers, timeout=6)
-        
-        if res.status_code != 200:
-            return {"Symbol": symbol, "Error": f"HTTP {res.status_code}: {res.text}"}
+    # Retries for Network Stability
+    for attempt in range(2):
+        try:
+            res = requests.post(url, json=payload, headers=headers, timeout=15)
             
-        json_data = res.json()
+            if res.status_code != 200:
+                return {"Symbol": symbol, "Error": f"HTTP {res.status_code}: {res.text}"}
+                
+            json_data = res.json()
+            candles = json_data.get("data", json_data) if isinstance(json_data, dict) else {}
+            
+            if "close" not in candles or not candles["close"]:
+                return {"Symbol": symbol, "Error": "No intraday candles found for today"}
 
-        # Handle Dhan standard response dictionary wrapping
-        candles = json_data.get("data", json_data) if isinstance(json_data, dict) else {}
-        
-        if "close" not in candles or not candles["close"]:
-            return {"Symbol": symbol, "Error": "No intraday candles found for today"}
+            closes = candles["close"]
+            opens = candles["open"]
+            highs = candles["high"]
+            volumes = candles["volume"]
 
-        closes = candles["close"]
-        opens = candles["open"]
-        highs = candles["high"]
-        volumes = candles["volume"]
+            if not volumes or len(volumes) < 2:
+                return {"Symbol": symbol, "Error": "Insufficient volume data"}
 
-        if not volumes or len(volumes) < 2:
-            return {"Symbol": symbol, "Error": "Insufficient volume data"}
+            ltp = float(closes[-1])
+            day_open = float(opens[0])
+            day_high = max([float(h) for h in highs])
+            pdc = float(opens[0])
 
-        ltp = float(closes[-1])
-        day_open = float(opens[0])
-        day_high = max([float(h) for h in highs])
-        pdc = float(opens[0])
+            curr_1m_vol = float(volumes[-1])
+            total_vol = float(sum([float(v) for v in volumes]))
 
-        curr_1m_vol = float(volumes[-1])
-        total_vol = float(sum([float(v) for v in volumes]))
+            vol_series = pd.Series([float(v) for v in volumes])
+            avg_1m_vol = float(vol_series.tail(20).mean()) if len(vol_series) >= 20 else (total_vol / max(len(vol_series), 1))
+            rvol = curr_1m_vol / avg_1m_vol if avg_1m_vol > 0 else 1.0
 
-        vol_series = pd.Series([float(v) for v in volumes])
-        avg_1m_vol = float(vol_series.tail(20).mean()) if len(vol_series) >= 20 else (total_vol / max(len(vol_series), 1))
-        rvol = curr_1m_vol / avg_1m_vol if avg_1m_vol > 0 else 1.0
+            turnover_1m = ltp * curr_1m_vol
+            vwap = sum(float(c) * float(v) for c, v in zip(closes, volumes)) / total_vol if total_vol > 0 else ltp
 
-        turnover_1m = ltp * curr_1m_vol
-        vwap = sum(float(c) * float(v) for c, v in zip(closes, volumes)) / total_vol if total_vol > 0 else ltp
+            candle1_open = float(opens[0])
+            candle1_close = float(closes[0])
+            candle1_change_pct = ((candle1_close - candle1_open) / candle1_open) * 100 if candle1_open > 0 else 0
 
-        candle1_open = float(opens[0])
-        candle1_close = float(closes[0])
-        candle1_change_pct = ((candle1_close - candle1_open) / candle1_open) * 100 if candle1_open > 0 else 0
+            open_gap_pct = ((candle1_open - pdc) / pdc) * 100 if pdc > 0 else 0
+            day_gain_pct = ((ltp - pdc) / pdc) * 100 if pdc > 0 else 0
+            max_gain_pct = ((day_high - candle1_open) / candle1_open) * 100 if candle1_open > 0 else 0
 
-        open_gap_pct = ((candle1_open - pdc) / pdc) * 100 if pdc > 0 else 0
-        day_gain_pct = ((ltp - pdc) / pdc) * 100 if pdc > 0 else 0
-        max_gain_pct = ((day_high - candle1_open) / candle1_open) * 100 if candle1_open > 0 else 0
+            # Tier Signals
+            tier1_signal = (1.0 <= open_gap_pct <= 4.0) and (candle1_change_pct >= 3.0) and (rvol >= 5.0)
+            tier2_signal = (rvol >= 3.0)
+            tier3_signal = (max_gain_pct >= 10.0) and (ltp < vwap * 0.99)
+            tier4_signal = (rvol >= 4.0) and (ltp < candle1_open * 0.975)
 
-        # Tier Signals Logic
-        tier1_signal = (1.0 <= open_gap_pct <= 4.0) and (candle1_change_pct >= 3.0) and (rvol >= 5.0)
-        tier2_signal = (rvol >= 3.0)
-        tier3_signal = (max_gain_pct >= 10.0) and (ltp < vwap * 0.99)
-        tier4_signal = (rvol >= 4.0) and (ltp < candle1_open * 0.975)
+            is_triggered = tier1_signal or tier2_signal or tier3_signal or tier4_signal
+            capital_deployment = (curr_1m_vol * ltp * 0.0025) / 5
 
-        is_triggered = tier1_signal or tier2_signal or tier3_signal or tier4_signal
-        capital_deployment = (curr_1m_vol * ltp * 0.0025) / 5
-
-        return {
-            "Symbol": symbol,
-            "LTP": round(ltp, 2),
-            "Day Gain %": f"{day_gain_pct:+.2f}%",
-            "RVOL": f"{rvol:.1f}x",
-            "VWAP": round(vwap, 2),
-            "1m Turnover": f"₹{turnover_1m / 100000:.1f}L",
-            "Max Deploy (₹)": f"₹{capital_deployment:,.0f}",
-            "Tier 1 (Gap Momentum)": "🟢 TRIGGERED" if tier1_signal else "-",
-            "Tier 2 (Stealth Expansion)": "⚡ STEALTH" if tier2_signal else "-",
-            "Tier 3 (Pump & Collapse)": "🔴 COLLAPSE" if tier3_signal else "-",
-            "Tier 4 (Shock Dump)": "🚨 SHOCK DUMP" if tier4_signal else "-",
-            "Triggered": is_triggered
-        }
-    except Exception as e:
-        return {"Symbol": symbol, "Error": str(e)}
+            return {
+                "Symbol": symbol,
+                "LTP": round(ltp, 2),
+                "Day Gain %": f"{day_gain_pct:+.2f}%",
+                "RVOL": f"{rvol:.1f}x",
+                "VWAP": round(vwap, 2),
+                "1m Turnover": f"₹{turnover_1m / 100000:.1f}L",
+                "Max Deploy (₹)": f"₹{capital_deployment:,.0f}",
+                "Tier 1 (Gap Momentum)": "🟢 TRIGGERED" if tier1_signal else "-",
+                "Tier 2 (Stealth Expansion)": "⚡ STEALTH" if tier2_signal else "-",
+                "Tier 3 (Pump & Collapse)": "🔴 COLLAPSE" if tier3_signal else "-",
+                "Tier 4 (Shock Dump)": "🚨 SHOCK DUMP" if tier4_signal else "-",
+                "Triggered": is_triggered
+            }
+        except requests.exceptions.Timeout:
+            if attempt == 1:
+                return {"Symbol": symbol, "Error": "Dhan API Server Timeout (15s)"}
+        except Exception as e:
+            return {"Symbol": symbol, "Error": str(e)}
 
 # Streamlit App Execution
 st.title("⚡ Universal Tier Momentum Engine")
@@ -159,7 +161,7 @@ if st.button("🔄 Refresh Market Data", use_container_width=True):
 results = []
 errors = []
 
-with ThreadPoolExecutor(max_workers=7) as executor:
+with ThreadPoolExecutor(max_workers=3) as executor:
     futures = [executor.submit(fetch_dhan_intraday_data, sym, sec_id) for sym, sec_id in DHAN_WATCHLIST.items()]
     for future in futures:
         res = future.result()
