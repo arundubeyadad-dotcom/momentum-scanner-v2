@@ -4,7 +4,6 @@ from dhanhq import dhanhq
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, time
 
-# Set Page Layout for Mobile / Samsung Fold
 st.set_page_config(
     page_title="Institutional Stealth & Catalyst Engine",
     page_icon="⚡",
@@ -20,16 +19,16 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # -------------------------------------------------------------------
-# DHAN HQ API CREDENTIALS
+# DHAN API INITIALIZATION VIA SECRETS (NO HARDCODED KEYS)
 # -------------------------------------------------------------------
-CLIENT_ID = 1102152375
-ACCESS_TOKEN = eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzUxMiJ9.eyJ1c2VyUmVnaW9uIjoiUjEiLCJpc3MiOiJkaGFuIiwicGFydG5lcklkIjoiIiwiZXhwIjoxNzg4NzMzNDMwLCJpYXQiOjE3ODg2NDcwMzAsInRva2VuQ29uc3VtZXJUeXBlIjoiU0VMRiIsIndlYmhvb2tVcmwiOiIiLCJkaGFuQ2xpZW50SWQiOiIxMTAyMTUyMzc1In0.UWI36FXsjyDmsiNdmgDflmzup8YSI17whdFoDGq3rE8MfuWHe65gUuMrEt2y8ag17uUVIpFoed_JW1bh7aQRiA
+try:
+    CLIENT_ID = str(st.secrets["DHAN_CLIENT_ID"])
+    ACCESS_TOKEN = str(st.secrets["DHAN_ACCESS_TOKEN"])
+    dhan = dhanhq(CLIENT_ID, ACCESS_TOKEN)
+except Exception:
+    st.error("Missing credentials in Streamlit Secrets! Configure DHAN_CLIENT_ID and DHAN_ACCESS_TOKEN under App Settings.")
+    st.stop()
 
-dhan = dhanhq(CLIENT_ID, ACCESS_TOKEN)
-
-# -------------------------------------------------------------------
-# AUDIO ALERT NOTIFICATION TRIGGER
-# -------------------------------------------------------------------
 def trigger_alert_sound():
     sound_html = """
     <audio autoplay style="display:none;">
@@ -38,7 +37,7 @@ def trigger_alert_sound():
     """
     st.markdown(sound_html, unsafe_allow_html=True)
 
-# Map Security IDs for Dhan API (NSE Equity Segment)
+# Watchlist with Dhan Security IDs
 DHAN_WATCHLIST = {
     "TBZ": "14366",
     "RESPONIND": "11915",
@@ -51,7 +50,6 @@ DHAN_WATCHLIST = {
 
 def analyze_ticker(symbol, security_id):
     try:
-        # Fetch Intraday 1-Min Data via Dhan HQ API
         data = dhan.historical_minute_charts(
             security_id=security_id,
             exchange_segment="NSE_EQ",
@@ -67,14 +65,11 @@ def analyze_ticker(symbol, security_id):
         if df_1m.empty:
             return None
 
-        # Data Points Extraction
         ltp = float(df_1m['close'].iloc[-1])
         day_open = float(df_1m['open'].iloc[0])
         day_high = float(df_1m['high'].max())
-        day_low = float(df_1m['low'].min())
         pdc = float(df_1m['open'].iloc[0])
         
-        # 1-Minute Current Bar Metrics
         curr_1m_vol = float(df_1m['volume'].iloc[-1])
         avg_1m_vol = float(df_1m['volume'].tail(20).mean())
         rvol = curr_1m_vol / avg_1m_vol if avg_1m_vol > 0 else 1.0
@@ -96,36 +91,38 @@ def analyze_ticker(symbol, security_id):
         day_gain_pct = ((ltp - pdc) / pdc) * 100 if pdc > 0 else 0
         max_gain_pct = ((day_high - day_open) / day_open) * 100
 
-        # Tier Signals
-        tier1_signal = (1.0 <= open_gap_pct <= 4.0) and (candle1_change_pct >= 3.0) and (rvol >= 5.0)
+        # Institutional Screening Logic
+        tier1_signal = (1.0 <= open_gap_pct <= 4.0) and (candle1_change_pct >= 3.0) and (rvol >= 5.0) and (turnover_1m >= 1_000_000)
         tier2_signal = (rvol >= 3.0) and (turnover_1m >= 1_000_000)
         tier3_signal = (max_gain_pct >= 10.0) and (ltp < vwap * 0.99) and (datetime.now().time() <= time(10, 30))
         tier4_signal = (rvol >= 4.0) and (ltp < day_open * 0.975)
 
+        # Deployment Formula: (Current Volume * Price * 0.25%) / 5
         capital_deployment = (curr_1m_vol * ltp * 0.0025) / 5
 
-        return {
-            "Symbol": symbol,
-            "LTP": round(ltp, 2),
-            "Day Gain %": f"{day_gain_pct:+.2f}%",
-            "RVOL": f"{rvol:.1f}x",
-            "VWAP": round(vwap, 2),
-            "Turnover (1m)": f"₹{turnover_1m / 100000:.1f}L",
-            "Max Deploy (₹)": f"₹{capital_deployment:,.0f}",
-            "Tier 1 (TBZ)": "🟢 TRIGGERED" if tier1_signal else "-",
-            "Tier 2 (RESPONIND)": "⚡ STEALTH" if tier2_signal else "-",
-            "Tier 3 (Pump Short)": "🔴 COLLAPSE" if tier3_signal else "-",
-            "Tier 4 (Wonderla)": "🚨 SHOCK DUMP" if tier4_signal else "-"
-        }
+        if tier1_signal or tier2_signal or tier3_signal or tier4_signal or True:
+            return {
+                "Symbol": symbol,
+                "LTP": round(ltp, 2),
+                "Day Gain %": f"{day_gain_pct:+.2f}%",
+                "RVOL": f"{rvol:.1f}x",
+                "VWAP": round(vwap, 2),
+                "Turnover (1m)": f"₹{turnover_1m / 100000:.1f}L",
+                "Max Deploy (₹)": f"₹{capital_deployment:,.0f}",
+                "Tier 1 (TBZ)": "🟢 TRIGGERED" if tier1_signal else "-",
+                "Tier 2 (RESPONIND)": "⚡ STEALTH" if tier2_signal else "-",
+                "Tier 3 (Pump Short)": "🔴 COLLAPSE" if tier3_signal else "-",
+                "Tier 4 (Wonderla)": "🚨 SHOCK DUMP" if tier4_signal else "-"
+            }
     except Exception:
         return None
 
 # -------------------------------------------------------------------
-# UI & PARALLEL FETCH
+# APP DISPLAY
 # -------------------------------------------------------------------
-st.title("⚡ Dhan Live Market Screener")
+st.title("⚡ Direct Dhan Live Market Engine")
 
-if st.button("🔄 Refresh Data", use_container_width=True):
+if st.button("🔄 Refresh Live Ticks", use_container_width=True):
     st.cache_data.clear()
 
 triggered_stocks = []
@@ -138,6 +135,7 @@ with ThreadPoolExecutor(max_workers=5) as executor:
 
 if triggered_stocks:
     trigger_alert_sound()
+    st.subheader("🎯 Live Stream Active")
     st.dataframe(pd.DataFrame(triggered_stocks), use_container_width=True)
 else:
-    st.warning("No stocks matching Tier 1-4 criteria or Dhan API session expired.")
+    st.info("Scanning live market... No setups matching Tier 1-4 criteria at this exact minute.")
